@@ -57,6 +57,59 @@ test('API 错误处理：方法不允许与非法 JSON', async () => {
   });
 });
 
+test('反向追溯 API：唯一追溯、公共边合并与错误处理', async () => {
+  await withServer(async (base) => {
+    const scale2 = ident(2, 2).map((row) => row.map((k) => ({ x: 2 * k.x, y: 2 * k.y })));
+    const res = await fetch(`${base}/api/trace`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        rows: 2, cols: 2, knots: scale2,
+        needles: [{ x: 1, y: 1 }, { x: 2, y: 2 }],
+      }),
+    });
+    assert.equal(res.status, 200);
+    const body = await res.json();
+    assert.equal(body.ok, true);
+    assert.equal(body.stage, 'trace');
+    assert.equal(body.traces.length, 2);
+    assert.deepEqual([body.traces[0].u, body.traces[0].v], [0.5, 0.5]);
+    // 中心网结：四单元公共角点合并为一项
+    assert.deepEqual([body.traces[1].u, body.traces[1].v], [1, 1]);
+    assert.equal(body.traces[1].witnesses.length, 4);
+
+    // 方法不允许与非法 JSON
+    const get = await fetch(`${base}/api/trace`);
+    assert.equal(get.status, 405);
+    const bad = await fetch(`${base}/api/trace`, { method: 'POST', body: 'not json' });
+    assert.equal(bad.status, 400);
+
+    // 针位缺失：输入校验失败
+    const noNeedles = await fetch(`${base}/api/trace`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ rows: 2, cols: 2, knots: ident(2, 2) }),
+    });
+    const nb = await noNeedles.json();
+    assert.equal(nb.ok, false);
+    assert.equal(nb.stage, 'validation');
+    assert.equal(nb.errors[0].kind, 'needles-count');
+
+    // 网格未通过校核：拒绝追溯
+    const folded = ident(2, 2);
+    folded[1][1] = { x: -1, y: -1 };
+    const refuse = await fetch(`${base}/api/trace`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ rows: 2, cols: 2, knots: folded, needles: [{ x: 0, y: 0 }, { x: 1, y: 1 }] }),
+    });
+    const rb = await refuse.json();
+    assert.equal(rb.ok, false);
+    assert.equal(rb.stage, 'geometry');
+    assert.equal(rb.traces, null);
+  });
+});
+
 test('静态文件：不存在的路径返回 404，路径穿越被拒绝', async () => {
   await withServer(async (base) => {
     const missing = await fetch(`${base}/no-such-file.js`);

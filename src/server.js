@@ -3,6 +3,7 @@ import { readFile } from 'node:fs/promises';
 import path from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 import { verifyGrid } from './shared/bilinear.js';
+import { traceNeedles } from './shared/trace.js';
 
 const ROOT = path.join(path.dirname(fileURLToPath(import.meta.url)), '..');
 const PUBLIC_DIR = process.env.PUBLIC_DIR || path.join(ROOT, 'dist', 'public');
@@ -49,6 +50,31 @@ async function serveStatic(res, urlPath) {
   }
 }
 
+/** 读取并解析 JSON 请求体；失败时直接写出错误响应并返回 null */
+async function readJsonBody(req, res) {
+  let size = 0;
+  const chunks = [];
+  try {
+    for await (const chunk of req) {
+      size += chunk.length;
+      if (size > MAX_BODY) {
+        sendJson(res, 413, { error: 'body too large' });
+        return null;
+      }
+      chunks.push(chunk);
+    }
+  } catch {
+    sendJson(res, 400, { error: 'failed to read body' });
+    return null;
+  }
+  try {
+    return JSON.parse(Buffer.concat(chunks).toString('utf8'));
+  } catch {
+    sendJson(res, 400, { error: 'invalid JSON' });
+    return null;
+  }
+}
+
 export function createServer() {
   return http.createServer(async (req, res) => {
     const url = new URL(req.url, 'http://localhost');
@@ -68,29 +94,21 @@ export function createServer() {
         sendJson(res, 405, { error: 'method not allowed' });
         return;
       }
-      let size = 0;
-      const chunks = [];
-      try {
-        for await (const chunk of req) {
-          size += chunk.length;
-          if (size > MAX_BODY) {
-            sendJson(res, 413, { error: 'body too large' });
-            return;
-          }
-          chunks.push(chunk);
-        }
-      } catch {
-        sendJson(res, 400, { error: 'failed to read body' });
-        return;
-      }
-      let spec;
-      try {
-        spec = JSON.parse(Buffer.concat(chunks).toString('utf8'));
-      } catch {
-        sendJson(res, 400, { error: 'invalid JSON' });
-        return;
-      }
+      const spec = await readJsonBody(req, res);
+      if (spec === null) return;
       sendJson(res, 200, verifyGrid(spec));
+      return;
+    }
+
+    // 反向追溯 API：织补面复核针位 → 原网纹样坐标（src/shared/trace.js）
+    if (url.pathname === '/api/trace') {
+      if (req.method !== 'POST') {
+        sendJson(res, 405, { error: 'method not allowed' });
+        return;
+      }
+      const spec = await readJsonBody(req, res);
+      if (spec === null) return;
+      sendJson(res, 200, traceNeedles(spec));
       return;
     }
 

@@ -3,7 +3,7 @@
   "version": "1.0.0",
   "private": true,
   "type": "module",
-  "description": "壁毯修复定位网：双线性连续形变校核与纹样标记换算",
+  "description": "壁毯修复定位网：双线性连续形变校核、纹样标记换算与复核针位反向追溯",
   "engines": {
     "node": ">=20"
   },

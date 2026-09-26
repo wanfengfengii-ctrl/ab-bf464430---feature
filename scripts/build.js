@@ -3,12 +3,14 @@ import { createHash } from 'node:crypto';
 import path from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 import { verifyGrid, makeIdentityKnots } from '../src/shared/bilinear.js';
+import { traceNeedles } from '../src/shared/trace.js';
 
 const ROOT = path.join(path.dirname(fileURLToPath(import.meta.url)), '..');
 
 /**
  * 构建：
- * 1. 自检——恒等网格必须通过校核且 J_min = 1，防止把损坏的数学模块打进产物；
+ * 1. 自检——恒等网格必须通过校核且 J_min = 1，且恒等网格反向追溯
+ *    （中心网结四单元合并、角点唯一）必须成功，防止把损坏的数学模块打进产物；
  * 2. 组装 dist/public（页面 + 共享数学模块），并生成带 SHA-256 的构建清单。
  */
 export async function build() {
@@ -22,6 +24,22 @@ export async function build() {
     throw new Error('构建自检失败：恒等网格校核未通过');
   }
 
+  const traceProbe = traceNeedles({
+    rows: 2,
+    cols: 2,
+    knots: makeIdentityKnots(2, 2),
+    needles: [{ x: 1, y: 1 }, { x: 0, y: 0 }],
+  });
+  const center = traceProbe.traces?.[0];
+  if (
+    !traceProbe.ok ||
+    center.u !== 1 || center.v !== 1 ||
+    center.witnesses.length !== 4 ||
+    traceProbe.traces[1].u !== 0 || traceProbe.traces[1].v !== 0
+  ) {
+    throw new Error('构建自检失败：恒等网格反向追溯未通过');
+  }
+
   const srcPublic = path.join(ROOT, 'src', 'public');
   const distPublic = path.join(ROOT, 'dist', 'public');
   await rm(path.join(ROOT, 'dist'), { recursive: true, force: true });
@@ -32,6 +50,7 @@ export async function build() {
     ['app.js', path.join(srcPublic, 'app.js'), path.join(distPublic, 'app.js')],
     ['styles.css', path.join(srcPublic, 'styles.css'), path.join(distPublic, 'styles.css')],
     ['shared/bilinear.js', path.join(ROOT, 'src', 'shared', 'bilinear.js'), path.join(distPublic, 'shared', 'bilinear.js')],
+    ['shared/trace.js', path.join(ROOT, 'src', 'shared', 'trace.js'), path.join(distPublic, 'shared', 'trace.js')],
   ];
 
   const manifest = { builtAt: new Date().toISOString(), files: {} };

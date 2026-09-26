@@ -3,6 +3,9 @@ import {
   MIN_ROWS, MAX_ROWS, MIN_COLS, MAX_COLS, MIN_MARKERS, MAX_MARKERS,
   CORNER_NAMES, FAILURE_TYPE_NAMES,
 } from '/shared/bilinear.js';
+import {
+  traceNeedles, MIN_NEEDLES, MAX_NEEDLES,
+} from '/shared/trace.js';
 
 const $ = (sel) => document.querySelector(sel);
 const canvas = $('#canvas');
@@ -21,8 +24,11 @@ const state = {
   cols: 3,
   knots: makeIdentityKnots(3, 3),
   markers: defaultMarkers(3, 3),
+  needles: [], // 复核针位（织补面整数坐标）；历史草稿可不录入，不影响校核
   result: null, // 最近一次校核结论
-  fresh: false, // 结论是否仍对应当前输入（任何修改立即置 false）
+  fresh: false, // 校核结论是否仍对应当前输入（任何修改立即置 false）
+  traceResult: null, // 最近一次反向追溯结论
+  traceFresh: false, // 追溯结论是否仍对应当前输入
 };
 
 /* ---------------- 输入控件 ---------------- */
@@ -47,9 +53,13 @@ function resetGrid(rows, cols) {
   state.cols = cols;
   state.knots = makeIdentityKnots(rows, cols);
   state.markers = defaultMarkers(rows, cols);
+  state.needles = [];
   state.result = null;
+  state.traceResult = null;
+  state.traceFresh = false;
   buildKnotFields();
   buildMarkerFields();
+  buildNeedleFields();
   invalidate();
 }
 
@@ -146,6 +156,75 @@ $('#addMarker').onclick = () => {
   invalidate();
 };
 
+/* ---------------- 复核针位录入 ---------------- */
+
+function buildNeedleFields() {
+  const host = $('#needleFields');
+  host.innerHTML = '';
+  if (state.needles.length === 0) {
+    const empty = document.createElement('p');
+    empty.className = 'hint';
+    empty.textContent = '未录入复核针位：可仅做校核（与历史草稿一致）；录入 2–8 个整数针位并校核通过后，可发起反向追溯。';
+    host.append(empty);
+  }
+  state.needles.forEach((n, idx) => {
+    const row = document.createElement('div');
+    row.className = 'needle-row';
+    const lab = document.createElement('em');
+    lab.textContent = `P${idx + 1}`;
+    const xi = document.createElement('input');
+    xi.type = 'number';
+    xi.step = '1';
+    xi.value = Number.isFinite(n.x) ? n.x : '';
+    xi.setAttribute('aria-label', `P${idx + 1} x`);
+    xi.oninput = () => { state.needles[idx].x = xi.valueAsNumber; invalidateTrace(); };
+    const yi = document.createElement('input');
+    yi.type = 'number';
+    yi.step = '1';
+    yi.value = Number.isFinite(n.y) ? n.y : '';
+    yi.setAttribute('aria-label', `P${idx + 1} y`);
+    yi.oninput = () => { state.needles[idx].y = yi.valueAsNumber; invalidateTrace(); };
+    const rm = document.createElement('button');
+    rm.type = 'button';
+    rm.textContent = '删除';
+    rm.onclick = () => {
+      state.needles.splice(idx, 1);
+      buildNeedleFields();
+      invalidateTrace();
+    };
+    row.append(lab, document.createTextNode('x ='), xi, document.createTextNode('y ='), yi, rm);
+    host.append(row);
+  });
+  $('#addNeedle').disabled = state.needles.length >= MAX_NEEDLES;
+}
+
+$('#addNeedle').onclick = () => {
+  if (state.needles.length >= MAX_NEEDLES) return;
+  state.needles.push({ x: Math.round(state.cols / 2), y: Math.round(state.rows / 2) });
+  buildNeedleFields();
+  invalidateTrace();
+};
+
+$('#traceBtn').onclick = () => {
+  if (!(state.result && state.fresh && state.result.ok)) return; // 按钮已禁用，双保险
+  state.traceResult = traceNeedles({
+    rows: state.rows,
+    cols: state.cols,
+    knots: state.knots,
+    needles: state.needles,
+  });
+  state.traceFresh = true;
+  renderTrace();
+  draw();
+};
+
+/** 复核针位编辑仅使追溯结论失效（不影响已校核结论） */
+function invalidateTrace() {
+  state.traceFresh = false;
+  renderTrace();
+  draw();
+}
+
 $('#verifyBtn').onclick = () => {
   state.result = verifyGrid({
     rows: state.rows,
@@ -155,13 +234,16 @@ $('#verifyBtn').onclick = () => {
   });
   state.fresh = true;
   renderResults();
+  renderTrace();
   draw();
 };
 
-/** 任何输入修改后立即使旧结论失效 */
+/** 任何输入修改后立即使旧结论失效（网结/纹样编辑同时使追溯结论失效） */
 function invalidate() {
   state.fresh = false;
+  state.traceFresh = false;
   renderResults();
+  renderTrace();
   draw();
 }
 
@@ -256,6 +338,89 @@ function renderConclusion(res) {
   return parts.join('');
 }
 
+/* ---------------- 反向追溯展示 ---------------- */
+
+function updateTraceBtn() {
+  const ready = !!(state.result && state.fresh && state.result.ok);
+  $('#traceBtn').disabled = !ready;
+  $('#tracePreHint').textContent = ready
+    ? `当前校核结论有效，可发起反向追溯（须录入 ${MIN_NEEDLES}–${MAX_NEEDLES} 个整数针位）。`
+    : '须先通过校核（且结论未失效），才能发起反向追溯。';
+}
+
+function renderTrace() {
+  updateTraceBtn();
+  const host = $('#traceResults');
+  const stale = $('#traceStaleNotice');
+  if (!state.traceResult) {
+    stale.hidden = true;
+    host.innerHTML = '<p class="hint">尚未追溯。校核通过后录入 2–8 个织补面整数针位，点击“反向追溯”。</p>';
+    return;
+  }
+  if (!state.traceFresh) {
+    stale.hidden = false;
+    host.innerHTML = '';
+    return;
+  }
+  stale.hidden = true;
+  host.innerHTML = renderTraceConclusion(state.traceResult);
+}
+
+function renderTraceConclusion(res) {
+  const parts = [];
+
+  if (res.stage === 'validation') {
+    parts.push(`<div class="banner fail">针位输入无效：共 ${res.errors.length} 处问题，首项如下。</div>`);
+    parts.push(`<p class="first-failure">首项失败证据：${res.errors[0].message}</p>`);
+    if (res.errors.length > 1) {
+      parts.push(`<ul>${res.errors.slice(1).map((e) => `<li>${e.message}</li>`).join('')}</ul>`);
+    }
+    return parts.join('');
+  }
+
+  if (res.stage === 'geometry') {
+    const f = res.geometry.firstFailure;
+    parts.push('<div class="banner fail">定位网未通过校核，禁止反向追溯。</div>');
+    if (f) {
+      parts.push(`<p class="first-failure">校核首项失败证据：单元 (${f.cell.r},${f.cell.c})，`
+        + `角点 ${CORNER_NAMES[f.corner]}，J = ${f.jacobian}，判定：${FAILURE_TYPE_NAMES[f.type]}。</p>`);
+    }
+    return parts.join('');
+  }
+
+  if (!res.ok) {
+    const f = res.firstFailure;
+    parts.push('<div class="banner fail">存在不可追溯针位：已按录入顺序拦截，其余针位结果不予输出。</div>');
+    parts.push(`<p class="first-failure">首个不可追溯证据：${f.message}</p>`);
+    if (f.reason === 'ambiguous' && f.positions) {
+      const items = f.positions.map((p) =>
+        `<li>原网 (${fmt(p.u)}, ${fmt(p.v)})，来自单元 ${p.witnesses.map((w) => `(${w.r},${w.c})`).join('、')}</li>`,
+      ).join('');
+      parts.push(`<ul>${items}</ul>`);
+    }
+    parts.push('<p class="hint">已拦截：不输出任何追溯结果，修复师不应依据歧义针位落针。</p>');
+    return parts.join('');
+  }
+
+  parts.push('<div class="banner ok">追溯通过：全部针位各自对应唯一原网位置。</div>');
+  const rows = res.traces.map((tr) => {
+    const witness = tr.witnesses.map((w) => `(${w.r},${w.c})`).join('、');
+    const evidence = tr.witnesses.length > 1 ? `公共边/角合并：${witness}` : witness;
+    return `<tr>
+      <td>P${tr.index + 1}</td>
+      <td>(${fmt(tr.x)}, ${fmt(tr.y)})</td>
+      <td><b>(${fmt(tr.u)}, ${fmt(tr.v)})</b></td>
+      <td>单元 (${tr.cell.r},${tr.cell.c})，s=${fmt(tr.s)}，t=${fmt(tr.t)}</td>
+      <td>${evidence}</td>
+    </tr>`;
+  }).join('');
+  parts.push(`<table>
+    <thead><tr><th>针位</th><th>织补坐标 (x, y)</th><th>原网坐标 (u, v)</th><th>所在单元 / 局部参数</th><th>证据单元</th></tr></thead>
+    <tbody>${rows}</tbody>
+  </table>`);
+  return parts.join('');
+}
+
 /* ---------------- 画布 ---------------- */
 
 const COLORS = {
@@ -265,6 +430,8 @@ const COLORS = {
   knotFill: '#ffffff',
   marker: '#6b7280',
   mapped: '#d32f2f',
+  needle: '#7b1fa2',
+  traced: '#00838f',
   ok: 'rgba(40,160,90,0.16)',
   fail: 'rgba(220,60,60,0.14)',
   failFirst: 'rgba(220,60,60,0.32)',
@@ -280,6 +447,13 @@ function computeView() {
   }
   for (const m of state.markers) {
     if (Number.isFinite(m.u) && Number.isFinite(m.v)) pts.push({ x: m.u, y: m.v });
+  }
+  for (const n of state.needles) {
+    if (Number.isFinite(n.x) && Number.isFinite(n.y)) pts.push({ x: n.x, y: n.y });
+  }
+  const traces = state.traceFresh && state.traceResult && state.traceResult.traces;
+  if (traces) {
+    for (const tr of traces) pts.push({ x: tr.u, y: tr.v });
   }
   let minX = Infinity, minY = Infinity, maxX = -Infinity, maxY = -Infinity;
   for (const p of pts) {
@@ -329,6 +503,7 @@ function draw() {
   drawOriginalGrid();
   drawCells();
   drawMarkers();
+  drawNeedles();
   drawKnots();
 }
 
@@ -437,6 +612,53 @@ function drawMarkers() {
   });
 }
 
+function drawNeedles() {
+  const res = state.traceFresh ? state.traceResult : null;
+  const traces = res && res.ok && res.traces ? res.traces : null;
+  ctx.font = '11px system-ui';
+  state.needles.forEach((n, idx) => {
+    if (!Number.isFinite(n.x) || !Number.isFinite(n.y)) return;
+    const [px, py] = toPx(n.x, n.y);
+    ctx.strokeStyle = COLORS.needle;
+    ctx.lineWidth = 2;
+    line(px - 5, py - 5, px + 5, py + 5);
+    line(px - 5, py + 5, px + 5, py - 5);
+    ctx.lineWidth = 1;
+    ctx.fillStyle = COLORS.needle;
+    ctx.fillText(`P${idx + 1}`, px + 8, py - 8);
+    const tr = traces && traces[idx];
+    if (tr) {
+      const [qx, qy] = toPx(tr.u, tr.v);
+      ctx.save();
+      ctx.setLineDash([3, 3]);
+      ctx.strokeStyle = COLORS.traced;
+      line(px, py, qx, qy);
+      ctx.restore();
+      ctx.beginPath();
+      ctx.arc(qx, qy, 5, 0, Math.PI * 2);
+      ctx.fillStyle = COLORS.traced;
+      ctx.fill();
+      ctx.fillText(`P${idx + 1}'`, qx + 9, qy + 14);
+    }
+  });
+
+  // 首个不可追溯针位证据高亮
+  if (res && !res.ok && res.stage === 'trace' && res.firstFailure) {
+    const f = res.firstFailure;
+    if (Number.isFinite(f.x) && Number.isFinite(f.y)) {
+      const [px, py] = toPx(f.x, f.y);
+      ctx.beginPath();
+      ctx.arc(px, py, 11, 0, Math.PI * 2);
+      ctx.strokeStyle = COLORS.mapped;
+      ctx.lineWidth = 2.5;
+      ctx.stroke();
+      ctx.lineWidth = 1;
+      ctx.fillStyle = COLORS.mapped;
+      ctx.fillText('首个不可追溯', px + 14, py - 10);
+    }
+  }
+}
+
 /* ---------------- 网结拖动 ---------------- */
 
 let dragKnot = null;
@@ -484,5 +706,7 @@ canvas.addEventListener('pointercancel', endDrag);
 
 buildKnotFields();
 buildMarkerFields();
+buildNeedleFields();
 renderResults();
+renderTrace();
 draw();

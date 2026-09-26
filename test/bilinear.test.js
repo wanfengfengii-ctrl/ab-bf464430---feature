@@ -1,7 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import {
-  verifyGrid, makeIdentityKnots, cellCorners, cornerJacobians,
+  verifyGrid, verifyGeometry, validateGridSpec, makeIdentityKnots, cellCorners, cornerJacobians,
   bilinearMap, locateCell, checkSharedEdges, cross2,
 } from '../src/shared/bilinear.js';
 
@@ -203,4 +203,37 @@ test('cellCorners 按固定角点序返回四角', () => {
     cellCorners(knots, 1, 1),
     [{ x: 1, y: 1 }, { x: 2, y: 1 }, { x: 2, y: 2 }, { x: 1, y: 2 }],
   );
+});
+
+test('verifyGeometry：只做几何校核，不涉及纹样标记', () => {
+  const ok = verifyGeometry(2, 2, ident(2, 2));
+  assert.equal(ok.ok, true);
+  assert.equal(ok.stage, 'geometry');
+  assert.equal(ok.minJacobian.value, 1);
+  assert.equal(ok.edges.continuous, true);
+  assert.equal('markers' in ok, false);
+
+  const folded = ident(2, 2);
+  folded[1][1] = { x: -1, y: -1 };
+  const bad = verifyGeometry(2, 2, folded);
+  assert.equal(bad.ok, false);
+  // 与 verifyGrid 的几何证据完全一致
+  const full = verifyGrid({ rows: 2, cols: 2, knots: folded, markers: threeMarkers });
+  assert.deepEqual(bad.firstFailure, full.firstFailure);
+  assert.deepEqual(bad.minJacobian, full.minJacobian);
+
+  const invalid = verifyGeometry(2, 2, [[{ x: 0.5, y: 0 }]]);
+  assert.equal(invalid.ok, false);
+  assert.equal(invalid.stage, 'validation');
+});
+
+test('validateGridSpec：与 validateInput 的网格部分行为一致', () => {
+  assert.equal(validateGridSpec(1, 2, []).at(0).kind, 'rows');
+  assert.equal(validateGridSpec(2, 5, []).at(0).kind, 'cols');
+  assert.equal(validateGridSpec(2, 2, []).at(0).kind, 'knots-shape');
+  const knots = ident(2, 2);
+  knots[1][0] = { x: 0.5, y: 1 };
+  const errs = validateGridSpec(2, 2, knots);
+  assert.equal(errs.at(0).kind, 'knot-integer');
+  assert.deepEqual([errs.at(0).i, errs.at(0).j], [1, 0]);
 });

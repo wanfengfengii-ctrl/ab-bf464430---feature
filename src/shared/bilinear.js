@@ -142,12 +142,12 @@ export function checkSharedEdges(knots, rows, cols) {
 }
 
 /**
- * 输入校验：网格规格、网结整数坐标、纹样标记数量与范围。
+ * 网格几何输入校验：网格规格与网结整数坐标（不含纹样标记）。
+ * 供 verifyGrid 与反向追溯 traceNeedles 共用。
  * 返回错误数组（空数组表示通过），每个错误含 kind 与中文 message。
  */
-export function validateInput(spec) {
+export function validateGridSpec(rows, cols, knots) {
   const errors = [];
-  const { rows, cols, knots, markers } = spec ?? {};
 
   if (!Number.isInteger(rows) || rows < MIN_ROWS || rows > MAX_ROWS) {
     errors.push({ kind: 'rows', message: `行数须为 ${MIN_ROWS}–${MAX_ROWS} 的整数，当前：${rows}` });
@@ -181,6 +181,23 @@ export function validateInput(spec) {
       }
     }
   }
+  return errors;
+}
+
+/**
+ * 输入校验：网格规格、网结整数坐标、纹样标记数量与范围。
+ * 返回错误数组（空数组表示通过），每个错误含 kind 与中文 message。
+ */
+export function validateInput(spec) {
+  const { rows, cols, knots, markers } = spec ?? {};
+
+  const gridErrors = validateGridSpec(rows, cols, knots);
+  // 规格/形状类错误为致命错误，不再继续检查标记（与既有行为一致）；
+  // 网结坐标错误仍继续检查标记并合并报告。
+  if (gridErrors.some((e) => e.kind === 'rows' || e.kind === 'cols' || e.kind === 'knots-shape')) {
+    return gridErrors;
+  }
+  const errors = [...gridErrors];
 
   if (!Array.isArray(markers) || markers.length < MIN_MARKERS || markers.length > MAX_MARKERS) {
     errors.push({
@@ -208,30 +225,12 @@ export function validateInput(spec) {
 }
 
 /**
- * 全网校核（连续判定）：
- * 1. 输入校验（无效坐标直接判负）；
- * 2. 逐单元（行优先）计算四角雅可比，首项失败按行优先单元 + 固定角点顺序报告；
- * 3. 相邻单元共享边连续性核验；
- * 4. 仅当全网通过时，才把纹样标记换算到织补坐标（避免输出失真位置）。
- *
- * 返回结果对象：
- *   ok, stage('validation'|'geometry'), errors,
- *   firstFailure: { cell:{r,c}, corner, jacobian, type:'fold'|'degenerate' } | null,
- *   minJacobian: { value, cell:{r,c}, corner } | null,
- *   cells: 行优先单元证据数组,
- *   edges: { continuous, edgeCount, mismatches },
- *   markers: 换算后的标记数组（失败时为 null）
+ * 全网几何校核（连续判定）的核心计算：
+ * 逐单元（行优先）计算四角雅可比，首项失败按行优先单元 + 固定角点顺序记录；
+ * 并做相邻单元共享边连续性核验。
+ * 返回 { ok, firstFailure, minJacobian, cells, edges }。
  */
-export function verifyGrid(spec) {
-  const errors = validateInput(spec);
-  if (errors.length) {
-    return {
-      ok: false, stage: 'validation', errors,
-      firstFailure: null, minJacobian: null, cells: [], edges: null, markers: null,
-    };
-  }
-
-  const { rows, cols, knots, markers } = spec;
+function computeGeometry(rows, cols, knots) {
   const cells = [];
   let firstFailure = null;
   let minJacobian = null;
@@ -257,7 +256,51 @@ export function verifyGrid(spec) {
   }
 
   const edges = checkSharedEdges(knots, rows, cols);
-  const ok = !firstFailure && edges.continuous;
+  return { ok: !firstFailure && edges.continuous, firstFailure, minJacobian, cells, edges };
+}
+
+/**
+ * 网格几何校核（不涉及纹样标记）：供反向追溯在校核通过后才允许求逆。
+ * 返回 { ok, stage, errors, firstFailure, minJacobian, cells, edges }。
+ */
+export function verifyGeometry(rows, cols, knots) {
+  const errors = validateGridSpec(rows, cols, knots);
+  if (errors.length) {
+    return {
+      ok: false, stage: 'validation', errors,
+      firstFailure: null, minJacobian: null, cells: [], edges: null,
+    };
+  }
+  return { stage: 'geometry', errors: [], ...computeGeometry(rows, cols, knots) };
+}
+
+/**
+ * 全网校核（连续判定）：
+ * 1. 输入校验（无效坐标直接判负）；
+ * 2. 逐单元（行优先）计算四角雅可比，首项失败按行优先单元 + 固定角点顺序报告；
+ * 3. 相邻单元共享边连续性核验；
+ * 4. 仅当全网通过时，才把纹样标记换算到织补坐标（避免输出失真位置）。
+ *
+ * 返回结果对象：
+ *   ok, stage('validation'|'geometry'), errors,
+ *   firstFailure: { cell:{r,c}, corner, jacobian, type:'fold'|'degenerate' } | null,
+ *   minJacobian: { value, cell:{r,c}, corner } | null,
+ *   cells: 行优先单元证据数组,
+ *   edges: { continuous, edgeCount, mismatches },
+ *   markers: 换算后的标记数组（失败时为 null）
+ */
+export function verifyGrid(spec) {
+  const errors = validateInput(spec);
+  if (errors.length) {
+    return {
+      ok: false, stage: 'validation', errors,
+      firstFailure: null, minJacobian: null, cells: [], edges: null, markers: null,
+    };
+  }
+
+  const { rows, cols, knots, markers } = spec;
+  const geometry = computeGeometry(rows, cols, knots);
+  const ok = geometry.ok;
 
   let mappedMarkers = null;
   if (ok) {
@@ -274,6 +317,6 @@ export function verifyGrid(spec) {
 
   return {
     ok, stage: 'geometry', errors: [],
-    firstFailure, minJacobian, cells, edges, markers: mappedMarkers,
+    ...geometry, markers: mappedMarkers,
   };
 }

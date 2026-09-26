@@ -9,7 +9,7 @@
 <body>
   <header>
     <h1>壁毯修复定位网校核</h1>
-    <p>每个单元视为连续双线性形变 · 全网不翻折连续判定 · 纹样标记换算到织补坐标</p>
+    <p>每个单元视为连续双线性形变 · 全网不翻折连续判定 · 纹样标记换算到织补坐标 · 复核针位反向追溯</p>
   </header>
 
   <main>
@@ -38,7 +38,8 @@
       <canvas id="canvas" width="680" height="680"></canvas>
       <p class="hint">
         灰虚线：原网；蓝色网格：织补后形变；白色方块：网结（可拖动）；
-        ◆：纹样标记原网位置；●：校核通过后换算出的织补位置。
+        ◆：纹样标记原网位置；●：校核通过后换算出的织补位置；
+        ✕：复核针位（织补面）；◎：追溯出的原网位置。
       </p>
     </section>
 
@@ -53,6 +54,22 @@
       <button id="verifyBtn" type="button" class="primary">校核</button>
       <div id="staleNotice" class="stale" hidden>⚠ 输入已修改，旧结论已失效，请重新校核。</div>
       <div id="results"></div>
+    </section>
+
+    <section class="panel">
+      <h2>5. 复核针位与反向追溯（织补面整数坐标，2–8 个）</h2>
+      <div id="needleFields"></div>
+      <div class="row">
+        <button id="addNeedle" type="button">＋ 添加针位</button>
+        <button id="traceBtn" type="button" class="primary">反向追溯</button>
+      </div>
+      <p id="tracePreHint" class="hint"></p>
+      <p class="hint">
+        对每个单元的双线性形变解析求逆，枚举并验证闭合单元域内的全部根（非采样、非迭代）；
+        只有全部针位各自对应唯一原网位置时才输出结果。未录入针位时不影响既有校核。
+      </p>
+      <div id="traceStaleNotice" class="stale" hidden>⚠ 输入已修改，追溯结论已失效，请重新追溯。</div>
+      <div id="traceResults"></div>
     </section>
   </main>
 
