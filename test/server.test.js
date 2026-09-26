@@ -57,6 +57,44 @@ test('API 错误处理：方法不允许与非法 JSON', async () => {
   });
 });
 
+test('反向追溯 API：唯一追溯与重叠歧义、网外证据', async () => {
+  await withServer(async (base) => {
+    const ok = await fetch(`${base}/api/trace`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        rows: 2, cols: 2, knots: ident(2, 2),
+        probes: [{ x: 0, y: 0 }, { x: 2, y: 2 }],
+      }),
+    });
+    assert.equal(ok.status, 200);
+    const ob = await ok.json();
+    assert.equal(ob.ok, true);
+    assert.equal(ob.stage, 'trace');
+    assert.equal(ob.traces.length, 2);
+    assert.deepEqual([ob.traces[1].u, ob.traces[1].v], [2, 2]);
+
+    const out = await fetch(`${base}/api/trace`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        rows: 2, cols: 2, knots: ident(2, 2),
+        probes: [{ x: 0, y: 0 }, { x: 9, y: 9 }],
+      }),
+    });
+    const ob2 = await out.json();
+    assert.equal(ob2.ok, false);
+    assert.equal(ob2.stage, 'trace');
+    assert.equal(ob2.evidence.status, 'outside');
+    assert.equal(ob2.evidence.index, 1);
+    assert.equal(ob2.traces, null);
+
+    // 非 GET/POST 方法
+    const gp = await fetch(`${base}/api/trace`);
+    assert.equal(gp.status, 405);
+  });
+});
+
 test('静态文件：不存在的路径返回 404，路径穿越被拒绝', async () => {
   await withServer(async (base) => {
     const missing = await fetch(`${base}/no-such-file.js`);

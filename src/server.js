@@ -2,7 +2,7 @@ import http from 'node:http';
 import { readFile } from 'node:fs/promises';
 import path from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
-import { verifyGrid } from './shared/bilinear.js';
+import { verifyGrid, traceBack } from './shared/bilinear.js';
 
 const ROOT = path.join(path.dirname(fileURLToPath(import.meta.url)), '..');
 const PUBLIC_DIR = process.env.PUBLIC_DIR || path.join(ROOT, 'dist', 'public');
@@ -62,8 +62,13 @@ export function createServer() {
       return;
     }
 
-    // 校核 API：与浏览器页面共用同一数学模块 src/shared/bilinear.js
-    if (url.pathname === '/api/verify') {
+    // 校核 / 反向追溯 API：与浏览器页面共用同一数学模块 src/shared/bilinear.js
+    const apiRoute = url.pathname === '/api/verify'
+      ? verifyGrid
+      : url.pathname === '/api/trace'
+        ? traceBack
+        : null;
+    if (apiRoute) {
       if (req.method !== 'POST') {
         sendJson(res, 405, { error: 'method not allowed' });
         return;
@@ -90,7 +95,7 @@ export function createServer() {
         sendJson(res, 400, { error: 'invalid JSON' });
         return;
       }
-      sendJson(res, 200, verifyGrid(spec));
+      sendJson(res, 200, apiRoute(spec));
       return;
     }
 

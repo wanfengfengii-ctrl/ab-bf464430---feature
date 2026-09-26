@@ -26,6 +26,15 @@ async function postVerify(spec) {
   return { status: res.status, body: await res.json() };
 }
 
+async function postTrace(spec) {
+  const res = await fetch(`${base}/api/trace`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(spec),
+  });
+  return { status: res.status, body: await res.json() };
+}
+
 /* 1) 健康检查（重试等待服务就绪） */
 let health = null;
 for (let i = 0; i < 30 && !health; i++) {
@@ -102,8 +111,101 @@ check(!!health && health.status === 'ok', '健康检查 GET /healthz', JSON.stri
   check(body.markers === null, '样例D：无效输入不输出纹样位置');
 }
 
+/* 6) 反向追溯样例 E：唯一追溯 —— 恒等网格整数针位精确回到原网格点 */
+{
+  const { status, body } = await postTrace({
+    rows: 2, cols: 2, knots: ident(2, 2),
+    probes: [{ x: 0, y: 0 }, { x: 2, y: 1 }, { x: 1, y: 2 }],
+  });
+  check(status === 200 && body.ok === true && body.stage === 'trace', '样例E：恒等网格反向追溯通过');
+  const t = body.traces || [];
+  check(t.length === 3 && near(t[0].u, 0) && near(t[0].v, 0) && near(t[1].u, 2) && near(t[1].v, 1),
+    '样例E：针位唯一回到原网坐标', JSON.stringify(t.map((z) => [z.u, z.v])));
+  check(t[0].exact && typeof t[0].exact.u.p === 'string', '样例E：附带 BigInt 精确数域证据');
+}
+
+/* 7) 反向追溯样例 F：公共边合并 —— 内部顶点四单元命中合一项，边界归属稳定 */
+{
+  // (1,1) 在恒等 2x2 中是四个单元的公共顶点
+  const { body: center } = await postTrace({
+    rows: 2, cols: 2, knots: ident(2, 2),
+    probes: [{ x: 1, y: 1 }, { x: 0, y: 0 }],
+  });
+  check(center.ok === true && center.traces[0].sharedEdgeMatches === 3,
+    '样例F：内部公共顶点四单元命中合并为一项', JSON.stringify(center.traces && center.traces[0]));
+  check(center.traces[0].cell.r === 1 && center.traces[0].cell.c === 1,
+    '样例F：公共点按既有边界约定稳定归属 (1,1)');
+
+  // 放大 2 倍网格：公共竖边整数中点 (2,1) 合两项
+  const k2 = ident(2, 2).map((row) => row.map((z) => ({ x: 2 * z.x, y: 2 * z.y })));
+  const { body: edge } = await postTrace({
+    rows: 2, cols: 2, knots: k2,
+    probes: [{ x: 2, y: 1 }, { x: 0, y: 0 }],
+  });
+  check(edge.ok === true && edge.traces[0].sharedEdgeMatches === 1 &&
+    near(edge.traces[0].u, 1) && near(edge.traces[0].v, 0.5),
+    '样例F：相邻单元公共边同位置合并为一项', JSON.stringify(edge.traces && edge.traces[0]));
+}
+
+/* 8) 反向追溯样例 G：重叠歧义 —— 全网校核通过但非相邻单元给出不同原网位置 */
+{
+  // 2x4 开口螺旋：8 个单元四角 J 全为正（最小 1839），片 0 与片 3 像有面积重叠
+  const spiral = [
+    [{ x: 280, y: 110 }, { x: 103, y: 252 }, { x: 0, y: 64 }, { x: 192, y: 0 }, { x: 219, y: 187 }],
+    [{ x: 240, y: 110 }, { x: 110, y: 214 }, { x: 34, y: 76 }, { x: 175, y: 29 }, { x: 195, y: 167 }],
+    [{ x: 200, y: 110 }, { x: 116, y: 177 }, { x: 68, y: 88 }, { x: 158, y: 58 }, { x: 171, y: 146 }],
+  ];
+  const vf = await postVerify({
+    rows: 2, cols: 4, knots: spiral,
+    markers: [{ u: 0.5, v: 0.5 }, { u: 2, v: 1 }, { u: 3.5, v: 1.5 }],
+  });
+  check(vf.body.ok === true && vf.body.minJacobian.value === 1839,
+    '样例G：歧义样例网格本身校核通过（J_min=1839）');
+
+  const { body } = await postTrace({
+    rows: 2, cols: 4, knots: spiral,
+    probes: [{ x: 280, y: 110 }, { x: 173, y: 132 }], // 先唯一、后歧义
+  });
+  const e = body.evidence || {};
+  check(body.ok === false && body.stage === 'trace' && e.index === 1 &&
+    e.status === 'ambiguous' && e.kind === 'overlap' && e.adjacent === false,
+    '样例G：非相邻单元不同原网位置 → 重叠歧义，首个证据按针位序号返回', JSON.stringify(e));
+  check(body.traces === null, '样例G：存在歧义针位时不输出其余追溯结果');
+
+  // 歧义针位排在第一位时 index=0
+  const first = await postTrace({
+    rows: 2, cols: 4, knots: spiral,
+    probes: [{ x: 173, y: 132 }, { x: 280, y: 110 }],
+  });
+  check(first.body.ok === false && first.body.evidence.index === 0,
+    '样例G：歧义针位首位时 index=0');
+}
+
+/* 9) 反向追溯样例 H：网外针位与输入校验 */
+{
+  const outside = await postTrace({
+    rows: 2, cols: 2, knots: ident(2, 2),
+    probes: [{ x: 0, y: 0 }, { x: 9, y: 9 }],
+  });
+  check(outside.body.ok === false && outside.body.evidence.status === 'outside' &&
+    outside.body.evidence.index === 1 && outside.body.traces === null,
+    '样例H：针位落在网外（无有效根）→ outside 证据，不输出结果');
+
+  const countBad = await postTrace({ rows: 2, cols: 2, knots: ident(2, 2), probes: [{ x: 0, y: 0 }] });
+  check(countBad.body.ok === false && countBad.body.stage === 'validation' &&
+    countBad.body.errors[0].kind === 'probes-count',
+    '样例H：针位数量须为 2–8 个');
+
+  const intBad = await postTrace({
+    rows: 2, cols: 2, knots: ident(2, 2),
+    probes: [{ x: 0.5, y: 0 }, { x: 0, y: 0 }],
+  });
+  check(intBad.body.stage === 'validation' && intBad.body.errors[0].kind === 'probe-integer',
+    '样例H：复核针位须为整数坐标');
+}
+
 if (failures) {
   console.error(`\n冒烟验收未通过：${failures} 项失败`);
   process.exit(1);
 }
-console.log('\n冒烟验收通过：健康检查 + 全部校核样例');
+console.log('\n冒烟验收通过：健康检查 + 校核样例 + 反向追溯（唯一/公共边/重叠歧义/网外）');

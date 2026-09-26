@@ -1,6 +1,7 @@
 import {
-  verifyGrid, makeIdentityKnots,
-  MIN_ROWS, MAX_ROWS, MIN_COLS, MAX_COLS, MIN_MARKERS, MAX_MARKERS,
+  verifyGrid, traceBack, makeIdentityKnots,
+  MIN_ROWS, MAX_ROWS, MIN_COLS, MAX_COLS,
+  MIN_MARKERS, MAX_MARKERS, MIN_PROBES, MAX_PROBES,
   CORNER_NAMES, FAILURE_TYPE_NAMES,
 } from '/shared/bilinear.js';
 
@@ -16,13 +17,24 @@ function defaultMarkers(rows, cols) {
   ];
 }
 
+function defaultProbes(rows, cols) {
+  // 默认两个互异的整数格点（2–4 规格下均合法），恒等网格中与原网一致
+  return [
+    { x: 1, y: 1 },
+    { x: Math.max(2, cols - 1), y: Math.max(2, rows - 1) },
+  ];
+}
+
 const state = {
   rows: 3,
   cols: 3,
   knots: makeIdentityKnots(3, 3),
   markers: defaultMarkers(3, 3),
-  result: null, // 最近一次校核结论
-  fresh: false, // 结论是否仍对应当前输入（任何修改立即置 false）
+  probes: defaultProbes(3, 3),
+  result: null,  // 最近一次校核结论
+  trace: null,   // 最近一次反向追溯结论
+  fresh: false,  // 校核结论是否仍对应当前输入
+  traceFresh: false, // 追溯结论是否仍对应当前输入
 };
 
 /* ---------------- 输入控件 ---------------- */
@@ -47,9 +59,12 @@ function resetGrid(rows, cols) {
   state.cols = cols;
   state.knots = makeIdentityKnots(rows, cols);
   state.markers = defaultMarkers(rows, cols);
+  state.probes = defaultProbes(rows, cols);
   state.result = null;
+  state.trace = null;
   buildKnotFields();
   buildMarkerFields();
+  buildProbeFields();
   invalidate();
 }
 
@@ -146,6 +161,62 @@ $('#addMarker').onclick = () => {
   invalidate();
 };
 
+/* ---------------- 复核针位控件 ---------------- */
+
+function buildProbeFields() {
+  const host = $('#probeFields');
+  host.innerHTML = '';
+  state.probes.forEach((p, idx) => {
+    const row = document.createElement('div');
+    row.className = 'marker-row';
+    const lab = document.createElement('em');
+    lab.textContent = `P${idx + 1}`;
+    const xi = document.createElement('input');
+    xi.type = 'number';
+    xi.step = '1';
+    xi.value = Number.isFinite(p.x) ? p.x : '';
+    xi.setAttribute('aria-label', `P${idx + 1} x`);
+    xi.oninput = () => { state.probes[idx].x = xi.valueAsNumber; invalidateTraceOnly(); };
+    const yi = document.createElement('input');
+    yi.type = 'number';
+    yi.step = '1';
+    yi.value = Number.isFinite(p.y) ? p.y : '';
+    yi.setAttribute('aria-label', `P${idx + 1} y`);
+    yi.oninput = () => { state.probes[idx].y = yi.valueAsNumber; invalidateTraceOnly(); };
+    const rm = document.createElement('button');
+    rm.type = 'button';
+    rm.textContent = '删除';
+    rm.disabled = state.probes.length <= MIN_PROBES;
+    rm.onclick = () => {
+      state.probes.splice(idx, 1);
+      buildProbeFields();
+      invalidateTraceOnly();
+    };
+    row.append(lab, document.createTextNode('x ='), xi, document.createTextNode('y ='), yi, rm);
+    host.append(row);
+  });
+  $('#addProbe').disabled = state.probes.length >= MAX_PROBES;
+}
+
+$('#addProbe').onclick = () => {
+  if (state.probes.length >= MAX_PROBES) return;
+  state.probes.push({ x: 0, y: 0 });
+  buildProbeFields();
+  invalidateTraceOnly();
+};
+
+$('#traceBtn').onclick = () => {
+  state.trace = traceBack({
+    rows: state.rows,
+    cols: state.cols,
+    knots: state.knots,
+    probes: state.probes,
+  });
+  state.traceFresh = true;
+  renderTraceResults();
+  draw();
+};
+
 $('#verifyBtn').onclick = () => {
   state.result = verifyGrid({
     rows: state.rows,
@@ -155,13 +226,27 @@ $('#verifyBtn').onclick = () => {
   });
   state.fresh = true;
   renderResults();
+  updateTraceGate();
   draw();
 };
 
-/** 任何输入修改后立即使旧结论失效 */
+/** 任何网结、网格规格或纹样标记修改：校核与追溯结论同时失效 */
 function invalidate() {
   state.fresh = false;
+  state.traceFresh = false;
   renderResults();
+  renderTraceResults();
+  updateTraceGate();
+  draw();
+}
+
+/**
+ * 仅复核针位增删改：只使追溯结论失效。
+ * 校核不以针位为输入，历史草稿（无针位）的既有校核与结果继续保持。
+ */
+function invalidateTraceOnly() {
+  state.traceFresh = false;
+  renderTraceResults();
   draw();
 }
 
@@ -256,6 +341,122 @@ function renderConclusion(res) {
   return parts.join('');
 }
 
+/* ---------------- 反向追溯结论展示 ---------------- */
+
+function updateTraceGate() {
+  const btn = $('#traceBtn');
+  const gate = $('#traceGate');
+  const res = state.result;
+  if (!res) {
+    btn.disabled = true;
+    gate.textContent = '请先在第 4 步完成定位网校核。';
+    return;
+  }
+  if (!state.fresh) {
+    btn.disabled = true;
+    gate.textContent = '输入已修改、旧校核失效，请重新校核后再追溯。';
+    return;
+  }
+  if (res.stage !== 'geometry' || !res.ok) {
+    btn.disabled = true;
+    gate.textContent = '定位网未通过校核，不能发起反向追溯。';
+    return;
+  }
+  btn.disabled = false;
+  gate.textContent = '定位网已校核通过，可录入针位并追溯。';
+}
+
+function exactText(e) {
+  const rad = BigInt(e.q) === 0n ? '' : ` ${BigInt(e.q) < 0n ? '−' : '+'} ${BigInt(e.q) < 0n ? -BigInt(e.q) : BigInt(e.q)}·√${e.d}`;
+  return `(${e.p}${rad}) / ${e.den}`;
+}
+
+function renderTraceResults() {
+  const host = $('#traceResults');
+  const stale = $('#traceStale');
+  if (!state.trace) {
+    stale.hidden = true;
+    host.innerHTML = '<p class="hint">尚未追溯。校核通过后录入 2–8 个整数针位，点击“反向追溯”。</p>';
+    return;
+  }
+  if (!state.traceFresh) {
+    stale.hidden = false;
+    host.innerHTML = '';
+    return;
+  }
+  stale.hidden = true;
+  const res = state.trace;
+  const parts = [];
+
+  if (res.stage === 'validation') {
+    parts.push(`<div class="banner fail">追溯输入无效：共 ${res.errors.length} 处问题，首项如下。</div>`);
+    parts.push(`<p class="first-failure">首项失败证据：${res.errors[0].message}</p>`);
+    if (res.errors.length > 1) {
+      parts.push(`<ul>${res.errors.slice(1).map((e) => `<li>${e.message}</li>`).join('')}</ul>`);
+    }
+    host.innerHTML = parts.join('');
+    return;
+  }
+
+  if (res.stage === 'geometry') {
+    const f = res.firstFailure;
+    parts.push('<div class="banner fail">定位网几何校核未通过，不能反向追溯。</div>');
+    if (f) {
+      parts.push(`<p class="first-failure">首项失败证据：单元 (${f.cell.r},${f.cell.c})，`
+        + `角点 ${CORNER_NAMES[f.corner]}，J = ${f.jacobian}（${FAILURE_TYPE_NAMES[f.type]}）。请重新校核。</p>`);
+    }
+    host.innerHTML = parts.join('');
+    return;
+  }
+
+  if (!res.ok) {
+    const ev = res.evidence;
+    let title = '反向追溯失败';
+    if (ev.status === 'outside') title = '针位落在网外（方程无有效根）';
+    if (ev.status === 'ambiguous') title = '原网位置不唯一（重叠歧义）';
+    if (ev.status === 'multi-root') title = '单元方程存在多个有效根';
+    parts.push(`<div class="banner fail">${title}</div>`);
+    parts.push(`<p class="first-failure">首个不可追溯证据（按针位录入顺序）：P${ev.index + 1} `
+      + `(${ev.probe.x}, ${ev.probe.y})。${ev.message || ''}</p>`);
+    if (Array.isArray(ev.positions) && ev.positions.length) {
+      parts.push('<table><thead><tr><th>候选单元</th><th>候选原网坐标 (u, v)</th></tr></thead><tbody>');
+      for (const p of ev.positions) {
+        parts.push(`<tr><td>单元 (${p.cell.r},${p.cell.c})</td><td>(${fmt(p.u)}, ${fmt(p.v)})</td></tr>`);
+      }
+      parts.push('</tbody></table>');
+    }
+    parts.push('<p class="hint">已拦截：不输出任何追溯结果，修复师不会依据该歧义针位落针。请核对针位或定位网。</p>');
+    host.innerHTML = parts.join('');
+    return;
+  }
+
+  parts.push('<div class="banner ok">反向追溯通过：每个针位均唯一对应原网位置（公共边同一位置已合并）。</div>');
+  parts.push(`<table>
+    <thead><tr><th>针位</th><th>织补坐标 (x, y)</th><th>原网坐标 (u, v)</th><th>所在单元</th><th>局部参数 (s, t)</th><th>公共边合并</th></tr></thead>
+    <tbody>`);
+  for (const t of res.traces) {
+    const merge = t.sharedEdgeMatches > 0
+      ? `与 ${t.sharedEdgeMatches} 个相邻单元同位置，已归此单元`
+      : '单一单元';
+    parts.push(`<tr>
+      <td>P${t.index + 1}</td>
+      <td>(${t.probe.x}, ${t.probe.y})</td>
+      <td><b>(${fmt(t.u)}, ${fmt(t.v)})</b></td>
+      <td>(${t.cell.r}, ${t.cell.c})</td>
+      <td>s=${fmt(t.s)}, t=${fmt(t.t)}</td>
+      <td>${merge}</td>
+    </tr>`);
+  }
+  parts.push('</tbody></table>');
+  parts.push('<details class="exact-details"><summary>查看 BigInt 精确数域证据（闭式二次方程根，判定不依赖浮点）</summary><dl>');
+  for (const t of res.traces) {
+    parts.push(`<dt>P${t.index + 1} 原网 u</dt><dd>${exactText(t.exact.u)}</dd>`);
+    parts.push(`<dt>P${t.index + 1} 原网 v</dt><dd>${exactText(t.exact.v)}</dd>`);
+  }
+  parts.push('</dl></details>');
+  host.innerHTML = parts.join('');
+}
+
 /* ---------------- 画布 ---------------- */
 
 const COLORS = {
@@ -280,6 +481,9 @@ function computeView() {
   }
   for (const m of state.markers) {
     if (Number.isFinite(m.u) && Number.isFinite(m.v)) pts.push({ x: m.u, y: m.v });
+  }
+  for (const p of state.probes) {
+    if (Number.isFinite(p.x) && Number.isFinite(p.y)) pts.push({ x: p.x, y: p.y });
   }
   let minX = Infinity, minY = Infinity, maxX = -Infinity, maxY = -Infinity;
   for (const p of pts) {
@@ -329,6 +533,7 @@ function draw() {
   drawOriginalGrid();
   drawCells();
   drawMarkers();
+  drawProbes();
   drawKnots();
 }
 
@@ -437,6 +642,72 @@ function drawMarkers() {
   });
 }
 
+/* ---------------- 复核针位（反向追溯） ---------------- */
+
+function drawProbes() {
+  const okTrace = state.traceFresh && state.trace && state.trace.ok;
+  const failTrace = state.traceFresh && state.trace && !state.trace.ok && state.trace.stage === 'trace';
+  const traces = okTrace ? state.trace.traces : null;
+  const failIndex = failTrace && state.trace.evidence ? state.trace.evidence.index : -1;
+  const failKind = failTrace ? state.trace.evidence.status : null;
+  ctx.font = '11px system-ui';
+  state.probes.forEach((p, idx) => {
+    if (!Number.isFinite(p.x) || !Number.isFinite(p.y)) return;
+    const [px, py] = toPx(p.x, p.y);
+    // 成功：绿色三角；失败：红色空心三角，首个不可追溯针位高亮
+    const isFail = idx === failIndex;
+    ctx.save();
+    if (isFail) {
+      ctx.beginPath();
+      ctx.moveTo(px, py - 7);
+      ctx.lineTo(px + 7, py);
+      ctx.lineTo(px, py + 7);
+      ctx.lineTo(px - 7, py);
+      ctx.closePath();
+      ctx.fillStyle = 'rgba(220,60,60,0.25)';
+      ctx.fill();
+      ctx.strokeStyle = COLORS.mapped;
+      ctx.lineWidth = 2.2;
+      ctx.stroke();
+      ctx.lineWidth = 1;
+      ctx.fillStyle = COLORS.mapped;
+      ctx.fillText(`P${idx + 1} ${failKind === 'outside' ? '（网外）' : '（歧义）'}`, px + 10, py - 8);
+    } else {
+      ctx.beginPath();
+      ctx.moveTo(px, py - 6);
+      ctx.lineTo(px + 6, py);
+      ctx.lineTo(px, py + 6);
+      ctx.lineTo(px - 6, py);
+      ctx.closePath();
+      const hit = traces && traces[idx];
+      ctx.fillStyle = hit ? 'rgba(40,160,90,0.25)' : 'rgba(107,114,128,0.12)';
+      ctx.fill();
+      ctx.strokeStyle = hit ? '#1e7e46' : COLORS.marker;
+      ctx.stroke();
+      ctx.fillStyle = hit ? '#1e7e46' : COLORS.marker;
+      ctx.fillText(`P${idx + 1}`, px + 9, py - 7);
+    }
+    ctx.restore();
+
+    // 追溯成功：把针位（织补坐标）连回它唯一对应的原网坐标
+    const hit = traces && traces[idx];
+    if (hit) {
+      const [qx, qy] = toPx(hit.u, hit.v);
+      ctx.save();
+      ctx.setLineDash([2, 3]);
+      ctx.strokeStyle = '#1e7e46';
+      line(px, py, qx, qy);
+      ctx.restore();
+      ctx.beginPath();
+      ctx.arc(qx, qy, 4, 0, Math.PI * 2);
+      ctx.fillStyle = '#1e7e46';
+      ctx.fill();
+      ctx.fillStyle = '#1e7e46';
+      ctx.fillText(`P${idx + 1}→(${fmt(hit.u)},${fmt(hit.v)})`, qx + 8, qy + 16);
+    }
+  });
+}
+
 /* ---------------- 网结拖动 ---------------- */
 
 let dragKnot = null;
@@ -484,5 +755,8 @@ canvas.addEventListener('pointercancel', endDrag);
 
 buildKnotFields();
 buildMarkerFields();
+buildProbeFields();
 renderResults();
+renderTraceResults();
+updateTraceGate();
 draw();
